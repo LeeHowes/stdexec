@@ -254,20 +254,18 @@ namespace exec {
     template <class R_>
     struct __op {
       using R = stdexec::__t<R_>;
-      decltype(stdexec::connect(std::declval<__exec_system_sender_impl>().pool_sender_, std::declval<R>())) scheduler_impl_;
 
       __op(R&& recv) : recv_{std::move(recv)} {
       }
 
       friend void tag_invoke(stdexec::start_t, __op& op) noexcept {
-        stdexec::start(op.scheduler_impl_);
+        if(auto os = op.os_) {
+          os->start();
+        }
       }
 
       R recv_;
       __exec_system_operation_state_interface* os_ = nullptr;
-      // TODO: Type-erase operation state to remove coupling with pool_sender
-      // Or, specifically, we can't pass R through to the pool sender, we need to store R and type erase a
-      // set of three callbacks representing R.
     };
 
     template <class R>
@@ -280,10 +278,10 @@ namespace exec {
       __exec_system_recevier receiver_impl{
         &op.recv_,
         [](void* cpp_recv){
-          stdexec::set_value(static_cast<R*>(cpp_recv));
+          stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
         },
         [](void* cpp_recv){
-          stdexec::set_stopped(static_cast<R*>(cpp_recv));
+          stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
         }};
       op.os_ = snd.sender_impl_->connect(std::move(receiver_impl));
 
