@@ -42,7 +42,7 @@ struct __exec_system_operation_state_interface {
   virtual void start() noexcept = 0;
 };
 
-struct __exec_system_recevier {
+struct __exec_system_recever {
   void* cpp_recv_;
   void (*set_value)(void* cpp_recv);
   void (*set_stopped)(void* cpp_recv);
@@ -50,7 +50,7 @@ struct __exec_system_recevier {
 };
 
 struct __exec_system_sender_interface {
-  virtual __exec_system_operation_state_interface* connect(__exec_system_recevier recv) noexcept = 0;
+  virtual __exec_system_operation_state_interface* connect(__exec_system_recever recv) noexcept = 0;
 };
 
 struct __exec_system_bulk_sender_interface {
@@ -114,29 +114,34 @@ struct __exec_system_pool_receiver {
 struct __exec_system_operation_state_impl : public __exec_system_operation_state_interface {
   __exec_system_operation_state_impl(
     __exec_pool_sender_t pool_sender,
-    __exec_system_recevier&& recv) :
+    __exec_system_recever&& recv) :
     recv_{std::move(recv)},
     pool_operation_state_{
       [&](){return stdexec::connect(std::move(pool_sender), __exec_system_pool_receiver{this});}()} {
   }
 
   void start() noexcept override {
+    std::cerr << "\t\tstart\n";
     stdexec::start(pool_operation_state_);
+    std::cerr << "\t\tafter pool start\n";
   }
 
-  __exec_system_recevier recv_;
+  __exec_system_recever recv_;
   decltype(stdexec::connect(
       std::move(std::declval<__exec_pool_sender_t>()), std::move(std::declval<__exec_system_pool_receiver>())))
     pool_operation_state_;
 };
 
 inline void tag_invoke(stdexec::set_value_t, __exec_system_pool_receiver&& recv) noexcept {
-  __exec_system_recevier &system_recv = recv.os_->recv_;
+  std::cerr << "\t\ttag_invoke set_value on pool_receiver\n";
+  __exec_system_recever &system_recv = recv.os_->recv_;
+  std::cerr << "\t\ttag_invoke set_value on pool_receiver 2\n";
   system_recv.set_value(&(system_recv.cpp_recv_));
+  std::cerr << "\t\ttag_invoke set_value on pool_receiver 3\n";
 }
 
 inline void tag_invoke(stdexec::set_stopped_t, __exec_system_pool_receiver&& recv) noexcept {
-  __exec_system_recevier &system_recv = recv.os_->recv_;
+  __exec_system_recever &system_recv = recv.os_->recv_;
   recv.os_->recv_.set_stopped(&(system_recv.cpp_recv_));
 }
 
@@ -148,7 +153,7 @@ struct __exec_system_sender_impl : public __exec_system_sender_interface {
 
   }
 
-  __exec_system_operation_state_interface* connect(__exec_system_recevier recv) noexcept override {
+  __exec_system_operation_state_interface* connect(__exec_system_recever recv) noexcept override {
     return new __exec_system_operation_state_impl(std::move(pool_sender_), std::move(recv));
   }
 
@@ -166,7 +171,7 @@ struct __exec_system_bulk_sender_impl : public __exec_system_bulk_sender_interfa
 };
 
 
-// Phase 1 implementation, single single implementation
+// Phase 1 implementation, single implementation
 static __exec_system_context_impl* __get_exec_system_context_impl() {
   static __exec_system_context_impl impl_;
 
@@ -255,11 +260,18 @@ namespace exec {
     struct __op {
       using R = stdexec::__t<R_>;
 
-      __op(R&& recv) : recv_{std::move(recv)} {
+      template<class F>
+      __op(R&& recv, F&& initFunc) : recv_{std::move(recv)}, os_{initFunc(*this)} {
+        std::cerr << "\t__op construct with with recv at " << &recv_ << ", __op is at: " << this << "\n";
       }
+      __op(const __op&) = delete;
+      __op(__op&&) = delete;
+      __op& operator= (const __op&) = delete;
+      __op& operator= (__op&&) = delete;
 
       friend void tag_invoke(stdexec::start_t, __op& op) noexcept {
         if(auto os = op.os_) {
+          std::cerr << "\ttag_invoke start with recv at " << &(op.recv_) << " __op is at " << &op << "\n";
           os->start();
         }
       }
@@ -273,19 +285,22 @@ namespace exec {
       noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>)
         -> __op<stdexec::__x<std::remove_cvref_t<R>>> {
 
-      __op<stdexec::__x<std::remove_cvref_t<R>>> op{std::move(rec)};
+      return __op<stdexec::__x<std::remove_cvref_t<R>>>{
+        std::move(rec),
+        [&](auto& op){
+          __exec_system_recever receiver_impl{
+            &op.recv_,
+            [](void* cpp_recv){
+              std::cerr << "\t\t\ttag_invoke set_value on " << cpp_recv << " and " << static_cast<R*>(cpp_recv) << "\n";
+              stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
+              std::cerr << "\t\t\ttag_invoke set_value end\n";
 
-      __exec_system_recevier receiver_impl{
-        &op.recv_,
-        [](void* cpp_recv){
-          stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
-        },
-        [](void* cpp_recv){
-          stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
+            },
+            [](void* cpp_recv){
+              stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
+            }};
+          return snd.sender_impl_->connect(std::move(receiver_impl));
         }};
-      op.os_ = snd.sender_impl_->connect(std::move(receiver_impl));
-
-      return op;
     }
 
     struct __env {

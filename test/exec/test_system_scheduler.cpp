@@ -26,12 +26,16 @@
 namespace ex = stdexec;
 
 TEST_CASE("simple schedule task on system context", "[types][system_scheduler]") {
+  std::cerr << "Start test system context\n";
   std::thread::id this_id = std::this_thread::get_id();
   std::thread::id pool_id{};
   exec::system_context ctx;
   exec::system_scheduler sched = ctx.get_scheduler();
+  std::cerr << "Start test system context: get_scheduler\n";
   auto snd = ex::then(ex::schedule(sched), [&] {pool_id = std::this_thread::get_id();});
+  std::cerr << "Start test system context: before sync_wait\n";
   ex::sync_wait(snd);
+  std::cerr << "Start test system context: waited\n";
   REQUIRE(pool_id != std::thread::id{});
   REQUIRE(this_id!=pool_id);
   std::cout << "This: " << this_id << "; pool: " << pool_id << "\n";
