@@ -43,7 +43,7 @@ struct __exec_system_operation_state_interface {
 };
 
 struct __exec_system_recever {
-  void* cpp_recv_;
+  void* cpp_recv_ = nullptr;
   void (*set_value)(void* cpp_recv);
   void (*set_stopped)(void* cpp_recv);
   // TODO: set_error
@@ -88,7 +88,6 @@ struct __exec_system_scheduler_impl : public __exec_system_scheduler_interface {
   }
 
   bool equals(const __exec_system_scheduler_interface* rhs) const override {
-    std::cerr << "rhs: " << rhs << "; this: " << this << "\n";
     return dynamic_cast<const __exec_system_scheduler_impl*>(rhs) == this;
   }
 };
@@ -108,7 +107,7 @@ struct __exec_system_pool_receiver {
     return {};
   }
 
-  __exec_system_operation_state_impl* os_;
+  __exec_system_operation_state_impl* os_ = nullptr;
 };
 
 struct __exec_system_operation_state_impl : public __exec_system_operation_state_interface {
@@ -120,10 +119,14 @@ struct __exec_system_operation_state_impl : public __exec_system_operation_state
       [&](){return stdexec::connect(std::move(pool_sender), __exec_system_pool_receiver{this});}()} {
   }
 
+  __exec_system_operation_state_impl(const __exec_system_operation_state_impl&) = delete;
+  __exec_system_operation_state_impl(__exec_system_operation_state_impl&&) = delete;
+  __exec_system_operation_state_impl& operator= (const __exec_system_operation_state_impl&) = delete;
+  __exec_system_operation_state_impl& operator= (__exec_system_operation_state_impl&&) = delete;
+
+
   void start() noexcept override {
-    std::cerr << "\t\tstart\n";
     stdexec::start(pool_operation_state_);
-    std::cerr << "\t\tafter pool start\n";
   }
 
   __exec_system_recever recv_;
@@ -133,11 +136,8 @@ struct __exec_system_operation_state_impl : public __exec_system_operation_state
 };
 
 inline void tag_invoke(stdexec::set_value_t, __exec_system_pool_receiver&& recv) noexcept {
-  std::cerr << "\t\ttag_invoke set_value on pool_receiver\n";
   __exec_system_recever &system_recv = recv.os_->recv_;
-  std::cerr << "\t\ttag_invoke set_value on pool_receiver 2\n";
-  system_recv.set_value(&(system_recv.cpp_recv_));
-  std::cerr << "\t\ttag_invoke set_value on pool_receiver 3\n";
+  system_recv.set_value((system_recv.cpp_recv_));
 }
 
 inline void tag_invoke(stdexec::set_stopped_t, __exec_system_pool_receiver&& recv) noexcept {
@@ -154,7 +154,8 @@ struct __exec_system_sender_impl : public __exec_system_sender_interface {
   }
 
   __exec_system_operation_state_interface* connect(__exec_system_recever recv) noexcept override {
-    return new __exec_system_operation_state_impl(std::move(pool_sender_), std::move(recv));
+    return
+      new __exec_system_operation_state_impl(std::move(pool_sender_), std::move(recv));
   }
 
    __exec_pool_sender_t pool_sender_;
@@ -184,7 +185,6 @@ inline __exec_system_scheduler_interface* __exec_system_context_impl::get_schedu
 }
 
 inline __exec_system_sender_interface* __exec_system_scheduler_impl::schedule() const {
-  // TODO: Can schedule on thread pool, but not absolutely necessary. Doing in start() for now.
   return new __exec_system_sender_impl(stdexec::schedule(pool_scheduler_));
 }
 
@@ -256,13 +256,13 @@ namespace exec {
         scheduler_impl_{scheduler_impl}, sender_impl_{sender_impl} {}
 
   private:
-    template <class R_>
+    template <class S, class R_>
     struct __op {
       using R = stdexec::__t<R_>;
 
       template<class F>
-      __op(R&& recv, F&& initFunc) : recv_{std::move(recv)}, os_{initFunc(*this)} {
-        std::cerr << "\t__op construct with with recv at " << &recv_ << ", __op is at: " << this << "\n";
+      __op(system_sender&& snd, R&& recv, F&& initFunc) :
+          snd_{std::move(snd)}, recv_{std::move(recv)}, os_{initFunc(*this)} {
       }
       __op(const __op&) = delete;
       __op(__op&&) = delete;
@@ -271,35 +271,34 @@ namespace exec {
 
       friend void tag_invoke(stdexec::start_t, __op& op) noexcept {
         if(auto os = op.os_) {
-          std::cerr << "\ttag_invoke start with recv at " << &(op.recv_) << " __op is at " << &op << "\n";
           os->start();
         }
       }
 
+      S snd_;
       R recv_;
       __exec_system_operation_state_interface* os_ = nullptr;
     };
 
     template <class R>
-    friend auto tag_invoke(stdexec::connect_t, system_sender snd, R&& rec) //
+    friend auto tag_invoke(stdexec::connect_t, system_sender&& snd, R&& rec) //
       noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>)
-        -> __op<stdexec::__x<std::remove_cvref_t<R>>> {
+        -> __op<system_sender, stdexec::__x<std::remove_cvref_t<R>>> {
 
-      return __op<stdexec::__x<std::remove_cvref_t<R>>>{
+      return __op<system_sender, stdexec::__x<std::remove_cvref_t<R>>>{
+        std::move(snd),
         std::move(rec),
-        [&](auto& op){
+        [](auto& op){
           __exec_system_recever receiver_impl{
             &op.recv_,
             [](void* cpp_recv){
-              std::cerr << "\t\t\ttag_invoke set_value on " << cpp_recv << " and " << static_cast<R*>(cpp_recv) << "\n";
               stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
-              std::cerr << "\t\t\ttag_invoke set_value end\n";
-
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
             }};
-          return snd.sender_impl_->connect(std::move(receiver_impl));
+
+          return op.snd_.sender_impl_->connect(std::move(receiver_impl));
         }};
     }
 
@@ -324,8 +323,8 @@ namespace exec {
     }
 
       // TODO: Do we need both? Should we get scheduler from sender or do we need sender at all?
-    __exec_system_scheduler_interface* scheduler_impl_;
-    __exec_system_sender_interface* sender_impl_;
+    __exec_system_scheduler_interface* scheduler_impl_ = nullptr;
+    __exec_system_sender_interface* sender_impl_ = nullptr;
   };
 
    template<stdexec::sender S, std::integral Shape, class Fn>
@@ -371,7 +370,7 @@ namespace exec {
       // TODO constructing op and the actual bulk part on the scheduler
     }
 
-    __exec_system_scheduler_impl* scheduler_impl_;
+    __exec_system_scheduler_impl* scheduler_impl_ = nullptr;
     S snd_;
     Shape shp_;
     Fn fn_;
