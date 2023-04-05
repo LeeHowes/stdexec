@@ -93,3 +93,59 @@ TEST_CASE("simple chain task on system context", "[types][system_scheduler]") {
   (void) snd;
   (void) snd2;
 }
+
+TEST_CASE("simple bulk task on system context", "[types][system_scheduler]") {
+  std::thread::id this_id = std::this_thread::get_id();
+  constexpr size_t num_tasks = 2;
+  std::thread::id pool_ids[num_tasks];
+  exec::system_context ctx;
+  exec::system_scheduler sched = ctx.get_scheduler();
+
+  auto bulk_snd = ex::bulk(
+    ex::schedule(sched),
+    num_tasks,
+    [&](long id) {
+      pool_ids[id] = std::this_thread::get_id();
+    });
+
+  ex::sync_wait(std::move(bulk_snd));
+
+  for(size_t i = 0; i < num_tasks; ++i) {
+    REQUIRE(pool_ids[i] != std::thread::id{});
+    REQUIRE(this_id!=pool_ids[i]);
+  }
+  (void) bulk_snd;
+}
+
+
+TEST_CASE("simple bulk chaining on system context", "[types][system_scheduler]") {
+  std::thread::id this_id = std::this_thread::get_id();
+  constexpr size_t num_tasks = 2;
+  std::thread::id pool_id{};
+  std::thread::id pool_ids[num_tasks];
+  exec::system_context ctx;
+  exec::system_scheduler sched = ctx.get_scheduler();
+
+  auto snd = ex::then(ex::schedule(sched),
+    [&] {
+      pool_id = std::this_thread::get_id();
+    });
+
+  auto bulk_snd = ex::bulk(std::move(snd),
+    num_tasks,
+    [&](long id) {
+      pool_ids[id] = std::this_thread::get_id();
+    });
+
+  ex::sync_wait(std::move(bulk_snd));
+
+
+  REQUIRE(pool_id != std::thread::id{});
+  REQUIRE(this_id!=pool_id);
+  for(size_t i = 0; i < num_tasks; ++i) {
+    REQUIRE(pool_ids[i] != std::thread::id{});
+    REQUIRE(this_id!=pool_ids[i]);
+  }
+  (void) snd;
+  (void) bulk_snd;
+}

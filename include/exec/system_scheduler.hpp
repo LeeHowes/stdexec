@@ -26,15 +26,24 @@ struct __exec_system_sender_interface;
 struct __exec_system_scheduler_impl;
 struct __exec_system_sender_impl;
 
+
 // Virtual interfaces to underlying implementations for initial simplicit
 // TODO: Potentially move to custom vtable implementations
 struct __exec_system_context_interface {
   virtual __exec_system_scheduler_interface* get_scheduler() noexcept = 0;
 };
 
+// bulk function for scheduler to transmit from, will wrap actual function stub stored in real type
+using __exec_system_bulk_shape = long;
+using __exec_system_bulk_function = void(__exec_system_bulk_shape);
+
+
 struct __exec_system_scheduler_interface {
   virtual stdexec::forward_progress_guarantee get_forward_progress_guarantee() const = 0;
   virtual __exec_system_sender_interface* schedule() = 0;
+  // TODO: Move chaining in here to support chaining after a system_sender or other system_bulk_sender
+  // or don't do anything that specific?
+  virtual __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function* fn) = 0;
   virtual bool equals(const __exec_system_scheduler_interface* rhs) const = 0;
 };
 
@@ -45,13 +54,6 @@ struct __exec_system_operation_state_interface {
 struct __exec_system_receiver {
   void* cpp_recv_ = nullptr;
   void (*set_value)(void* cpp_recv);
-  void (*set_stopped)(void* cpp_recv);
-  // TODO: set_error
-};
-
-struct __exec_system_bulk_receiver {
-  void* cpp_recv_ = nullptr;
-  void (*set_value)(void* cpp_recv, long);
   void (*set_stopped)(void* cpp_recv);
   // TODO: set_error
 };
@@ -87,6 +89,8 @@ struct __exec_system_scheduler_impl : public __exec_system_scheduler_interface {
 
   __exec_system_sender_interface* schedule() override;
 
+  __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function* fn) override;
+
   stdexec::forward_progress_guarantee get_forward_progress_guarantee() const override {
     return stdexec::forward_progress_guarantee::parallel;
   }
@@ -116,7 +120,7 @@ struct __exec_system_pool_receiver {
 
 struct __exec_system_operation_state_impl : public __exec_system_operation_state_interface {
   __exec_system_operation_state_impl(
-    __exec_pool_sender_t pool_sender,
+    __exec_pool_sender_t&& pool_sender,
     __exec_system_receiver&& recv) :
     recv_{std::move(recv)},
     pool_operation_state_{
@@ -171,9 +175,60 @@ struct __exec_system_sender_impl : public __exec_system_sender_interface {
    __exec_pool_sender_t pool_sender_;
 };
 
-// bulk function for scheduler to transmit from, will wrap actual function stub stored in real type
-using bulk_function = void(long);
 
+struct __exec_system_bulk_operation_state_impl;
+struct __exec_system_bulk_pool_receiver {
+  friend void tag_invoke(stdexec::set_value_t, __exec_system_bulk_pool_receiver&&) noexcept;
+
+  friend void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&&) noexcept;
+
+  friend void tag_invoke(stdexec::set_error_t, __exec_system_bulk_pool_receiver&&, std::exception_ptr) noexcept {
+  }
+
+  friend stdexec::empty_env tag_invoke(stdexec::get_env_t, const __exec_system_bulk_pool_receiver&) noexcept {
+    return {};
+  }
+
+  __exec_system_bulk_operation_state_impl* os_ = nullptr;
+};
+
+struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_state_interface {
+  __exec_system_bulk_operation_state_impl(
+    __exec_pool_sender_t&& pool_sender,
+    __exec_system_recever&& recv) :
+    recv_{std::move(recv)},
+    // TODO: Clearly this is going to be more sophisticated to launch multiple elements
+    // TODO: Call bulk_function_ across pool
+    pool_operation_state_{
+      [&](){return stdexec::connect(std::move(pool_sender), __exec_system_bulk_pool_receiver{this});}()} {
+  }
+
+  __exec_system_bulk_operation_state_impl(const __exec_system_bulk_operation_state_impl&) = delete;
+  __exec_system_bulk_operation_state_impl(__exec_system_bulk_operation_state_impl&&) = delete;
+  __exec_system_bulk_operation_state_impl& operator= (const __exec_system_bulk_operation_state_impl&) = delete;
+  __exec_system_bulk_operation_state_impl& operator= (__exec_system_bulk_operation_state_impl&&) = delete;
+
+
+  void start() noexcept override {
+    stdexec::start(pool_operation_state_);
+  }
+
+  __exec_system_recever recv_;
+  __exec_system_bulk_function* bulk_function_;
+  decltype(stdexec::connect(
+      std::move(std::declval<__exec_pool_sender_t>()), std::move(std::declval<__exec_system_bulk_pool_receiver>())))
+    pool_operation_state_;
+};
+
+inline void tag_invoke(stdexec::set_value_t, __exec_system_bulk_pool_receiver&& recv) noexcept {
+  __exec_system_recever &system_recv = recv.os_->recv_;
+  system_recv.set_value((system_recv.cpp_recv_));
+}
+
+inline void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&& recv) noexcept {
+  __exec_system_recever &system_recv = recv.os_->recv_;
+  recv.os_->recv_.set_stopped(&(system_recv.cpp_recv_));
+}
 
 // A bulk sender is just a system sender viewed externally.
 // TODO: a bulk operation state is just a system operation state viewed externally
@@ -215,6 +270,16 @@ inline __exec_system_sender_interface* __exec_system_scheduler_impl::schedule() 
 }
 
 
+inline __exec_system_sender_interface* __exec_system_scheduler_impl::bulk(
+    __exec_system_bulk_shape shp,
+    __exec_system_bulk_function* fn) {
+  // TODO: Construct bulk sender impl
+
+  // TEMPORARY to get to build
+  return new __exec_system_sender_impl(this, stdexec::schedule(pool_scheduler_));
+}
+
+
 
 
 namespace exec {
@@ -244,6 +309,7 @@ namespace exec {
 
   class system_scheduler {
   public:
+
     // Pointer that we ref count?
     system_scheduler(__exec_system_scheduler_interface* scheduler_interface) : scheduler_interface_(scheduler_interface) {}
 
@@ -350,53 +416,100 @@ namespace exec {
     __exec_system_sender_interface* sender_impl_ = nullptr;
   };
 
-   template<stdexec::sender S, std::integral Shape, class Fn>
+   template<stdexec::sender Pred, std::integral Shape, class Fn>
    class system_bulk_sender {
   public:
+    using Sender = Pred;
+    using Fun = Fn;
     using is_sender = void;
     using completion_signatures =
       stdexec::completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t() >;
 
-    system_bulk_sender(__exec_system_scheduler_impl* sched_impl, S&& snd, Shape&& shp, Fn&& fn) :
-        scheduler_impl_{sched_impl},
-        snd_(std::move(snd)),
-        shp_(std::move(shp)),
-        fn_(std::move(fn)) {
-      // TODO: On connect, connect input sender and construct operation that calls into the scheduler to
-      // construct a bulk sender with a very simple function type
-    }
+    system_bulk_sender(
+      __exec_system_sender_interface* sender_impl,
+      Sender pred,
+
+      Shape shape,
+      Fun&& fun) :
+      sender_impl_{sender_impl},
+      pred_{std::move(pred)},
+      shape_{std::move(shape)},
+      fun_{std::move(fun)} {}
 
   private:
-    template <class R_>
+    template <class S, class R_>
     struct __op {
       using R = stdexec::__t<R_>;
-      // TODO: Impl of bulk operation that completes to R
+
+      template<class F>
+      __op(system_bulk_sender&& snd, R&& recv, F&& initFunc) :
+          snd_{std::move(snd)}, recv_{std::move(recv)}, os_{initFunc(*this)} {
+      }
+      __op(const __op&) = delete;
+      __op(__op&&) = delete;
+      __op& operator= (const __op&) = delete;
+      __op& operator= (__op&&) = delete;
 
       friend void tag_invoke(stdexec::start_t, __op& op) noexcept {
-        // TODO
+        if(auto os = op.os_) {
+          os->start();
+        }
       }
 
-      R recv_;
       S snd_;
-      Shape shape_;
-      Fn fn_;
-      __exec_system_bulk_sender_impl bulk_sender_impl_;
+      R recv_;
+      __exec_system_operation_state_interface* os_ = nullptr;
     };
 
     template <class R>
-    friend auto tag_invoke(                                                //
-        stdexec::connect_t, system_bulk_sender<S, Shape, Fn> snd, R&& rec) //
+    friend auto tag_invoke(stdexec::connect_t, system_bulk_sender&& snd, R&& rec) //
       noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>)
-        -> __op<stdexec::__x<std::remove_cvref_t<R>>> {
-      //return {stdexec::connect(snd.impl_.pool_sender_, (R&&) rec)};
+        -> __op<system_bulk_sender, stdexec::__x<std::remove_cvref_t<R>>> {
 
-      // TODO constructing op and the actual bulk part on the scheduler
+      return __op<system_bulk_sender, stdexec::__x<std::remove_cvref_t<R>>>{
+        std::move(snd),
+        std::move(rec),
+        [](auto& op){
+          __exec_system_recever receiver_impl{
+            &op.recv_,
+            [](void* cpp_recv){
+              stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
+            },
+            [](void* cpp_recv){
+              stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
+            }};
+
+          return op.snd_.sender_impl_->connect(std::move(receiver_impl));
+        }};
     }
 
-    __exec_system_scheduler_impl* scheduler_impl_ = nullptr;
-    S snd_;
-    Shape shp_;
-    Fn fn_;
+    struct __env {
+      friend system_scheduler
+        tag_invoke(stdexec::get_completion_scheduler_t<stdexec::set_value_t>, const __env& self) //
+        noexcept {
+        return {self.scheduler_impl_};
+      }
+
+      friend system_scheduler
+        tag_invoke(stdexec::get_completion_scheduler_t<stdexec::set_stopped_t>, const __env& self) //
+        noexcept {
+        return {self.scheduler_impl_};
+      }
+
+
+      __exec_system_scheduler_interface* scheduler_impl_;
+    };
+
+    friend __env tag_invoke(stdexec::get_env_t, const system_bulk_sender& snd) noexcept {
+      return {snd.sender_impl_->get_completion_scheduler()};
+    }
+
+  // TODO: replace this with scheduler, we may not want to construct the underlying sender immediately
+    __exec_system_sender_interface* sender_impl_ = nullptr;
+    Sender pred_;
+    Shape shape_;
+    // TODO: Store this in OS and reference it from lambda passed to type erased OS
+    Fun fun_;
   };
 
 
@@ -420,11 +533,15 @@ namespace exec {
   system_bulk_sender<S, Shape, Fn> tag_invoke(              //
     stdexec::bulk_t,                                        //
     const system_scheduler& sch,                            //
-    S&& sndr,                                               //
+    S&& pred,                                               //
     Shape shape,                                            //
     Fn fun)                                                 //
     noexcept {
+      // TODO: Remove schedule here, it will be irrelevant
     return system_bulk_sender<S, Shape, Fn>{
-      sch.scheduler_interface_, (S&&) sndr, shape, (Fn&&) fun};
+      sch.scheduler_interface_->schedule(), (S&&) pred, shape, (Fn&&) fun};
   }
+  // TODO: the bulk_sender builds ok with this tag_invoke, but what changes the implementation?
+  // We need a bulk call on the scheduler_interface, probably because it has to reschedule explicitly anyway.
+
 } // namespace exec
