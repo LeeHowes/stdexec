@@ -426,12 +426,12 @@ namespace exec {
       stdexec::completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t() >;
 
     system_bulk_sender(
-      __exec_system_sender_interface* sender_impl,
+      __exec_system_scheduler_interface* scheduler_impl,
       Sender pred,
 
       Shape shape,
       Fun&& fun) :
-      sender_impl_{sender_impl},
+      scheduler_impl_{scheduler_impl},
       pred_{std::move(pred)},
       shape_{std::move(shape)},
       fun_{std::move(fun)} {}
@@ -478,8 +478,8 @@ namespace exec {
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
             }};
-
-          return op.snd_.sender_impl_->connect(std::move(receiver_impl));
+          // TODO We don't want to do this. We want to turn this into a proper operation that chains on snd
+          return op.snd_.scheduler_impl_->schedule()->connect(std::move(receiver_impl));
         }};
     }
 
@@ -501,11 +501,11 @@ namespace exec {
     };
 
     friend __env tag_invoke(stdexec::get_env_t, const system_bulk_sender& snd) noexcept {
-      return {snd.sender_impl_->get_completion_scheduler()};
+      // If we trigger this customization we know what the completion scheduler will be
+      return {snd.scheduler_impl_};
     }
 
-  // TODO: replace this with scheduler, we may not want to construct the underlying sender immediately
-    __exec_system_sender_interface* sender_impl_ = nullptr;
+    __exec_system_scheduler_interface* scheduler_impl_ = nullptr;
     Sender pred_;
     Shape shape_;
     // TODO: Store this in OS and reference it from lambda passed to type erased OS
@@ -537,11 +537,8 @@ namespace exec {
     Shape shape,                                            //
     Fn fun)                                                 //
     noexcept {
-      // TODO: Remove schedule here, it will be irrelevant
     return system_bulk_sender<S, Shape, Fn>{
-      sch.scheduler_interface_->schedule(), (S&&) pred, shape, (Fn&&) fun};
+      sch.scheduler_interface_, (S&&) pred, shape, (Fn&&) fun};
   }
-  // TODO: the bulk_sender builds ok with this tag_invoke, but what changes the implementation?
-  // We need a bulk call on the scheduler_interface, probably because it has to reschedule explicitly anyway.
 
 } // namespace exec
