@@ -56,6 +56,7 @@ struct __exec_system_receiver {
   void (*set_value)(void* cpp_recv);
   void (*set_stopped)(void* cpp_recv);
   // TODO: set_error
+
 };
 
 struct __exec_system_sender_interface {
@@ -416,8 +417,67 @@ namespace exec {
     __exec_system_sender_interface* sender_impl_ = nullptr;
   };
 
-   template<stdexec::sender Pred, std::integral Shape, class Fn>
-   class system_bulk_sender {
+  template <stdexec::sender Pred, std::integral Shape, class Fn, class R>
+  struct bulk_state {
+    system_bulk_sender<Pred, Shape, Fn> snd_;
+    R recv_;
+    __exec_system_operation_state_interface* os_ = nullptr;
+  };
+
+  template <stdexec::sender Pred, std::integral Shape, class Fn, class R>
+  struct bulk_recv {
+    bulk_state<Pred, Shape, Fn, R>& state_;
+
+    // TODO: Migrate code into these
+    // Code will make bulk call passing system_exec_recv that calls cpp_recv
+    // Passing stub lambda that calls fun
+    //void (*set_value)(void* cpp_recv);
+    //
+    //void (*set_stopped)(void* cpp_recv);
+
+    template <class... As>
+    friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
+      //self.set_value(std::move(self));
+      // TODO: Construct stuff then wrap op_.recv
+    }
+
+    friend void tag_invoke(stdexec::set_stopped_t, bulk_recv&& self) noexcept {
+      //self.set_stopped(std::move(self));
+    }
+
+    friend void tag_invoke(stdexec::set_error_t, bulk_recv&&, std::exception_ptr) noexcept {
+    }
+
+    friend auto tag_invoke(stdexec::get_env_t, const bulk_recv& self) noexcept {
+      return stdexec::get_env(self.state_.recv_);
+    }
+  };
+
+  template <stdexec::sender Pred, std::integral Shape, class Fn, class R>
+  struct __bulk_op {
+    using inner_op_state = stdexec::connect_result_t<Pred, bulk_recv<Pred, Shape, Fn, R>>;
+
+    template<class InitF>
+    __bulk_op(system_bulk_sender<Pred, Shape, Fn>&& snd, R&& recv, InitF&& initFunc) :
+        state_{std::move(snd), std::move(recv)}, pred_operation_state_{initFunc(*this)} {
+    }
+    __bulk_op(const __bulk_op&) = delete;
+    __bulk_op(__bulk_op&&) = delete;
+    __bulk_op& operator= (const __bulk_op&) = delete;
+    __bulk_op& operator= (__bulk_op&&) = delete;
+
+    friend void tag_invoke(stdexec::start_t, __bulk_op& op) noexcept {
+      if(auto os = op.state_.os_) {
+        os->start();
+      }
+    }
+
+    bulk_state<Pred, Shape, Fn, R> state_;
+    inner_op_state pred_operation_state_;
+  };
+
+  template<stdexec::sender Pred, std::integral Shape, class Fn>
+  class system_bulk_sender {
   public:
     using Sender = Pred;
     using Fun = Fn;
@@ -428,7 +488,6 @@ namespace exec {
     system_bulk_sender(
       __exec_system_scheduler_interface* scheduler_impl,
       Sender pred,
-
       Shape shape,
       Fun&& fun) :
       scheduler_impl_{scheduler_impl},
@@ -437,49 +496,18 @@ namespace exec {
       fun_{std::move(fun)} {}
 
   private:
-    template <class S, class R_>
-    struct __op {
-      using R = stdexec::__t<R_>;
-
-      template<class F>
-      __op(system_bulk_sender&& snd, R&& recv, F&& initFunc) :
-          snd_{std::move(snd)}, recv_{std::move(recv)}, os_{initFunc(*this)} {
-      }
-      __op(const __op&) = delete;
-      __op(__op&&) = delete;
-      __op& operator= (const __op&) = delete;
-      __op& operator= (__op&&) = delete;
-
-      friend void tag_invoke(stdexec::start_t, __op& op) noexcept {
-        if(auto os = op.os_) {
-          os->start();
-        }
-      }
-
-      S snd_;
-      R recv_;
-      __exec_system_operation_state_interface* os_ = nullptr;
-    };
 
     template <class R>
     friend auto tag_invoke(stdexec::connect_t, system_bulk_sender&& snd, R&& rec) //
       noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>)
-        -> __op<system_bulk_sender, stdexec::__x<std::remove_cvref_t<R>>> {
+        -> __bulk_op<Pred, Shape, Fn, R> {
 
-      return __op<system_bulk_sender, stdexec::__x<std::remove_cvref_t<R>>>{
+      return __bulk_op<Pred, Shape, Fn, R>{
         std::move(snd),
         std::move(rec),
         [](auto& op){
-          __exec_system_receiver receiver_impl{
-            &op.recv_,
-            [](void* cpp_recv){
-              stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
-            },
-            [](void* cpp_recv){
-              stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
-            }};
-          // TODO We don't want to do this. We want to turn this into a proper operation that chains on snd
-          return op.snd_.scheduler_impl_->schedule()->connect(std::move(receiver_impl));
+          // Connect bulk input receiver with the previous operation and store in the OS
+          return stdexec::connect(std::move(op.state_.snd_.pred_), bulk_recv<Pred, Shape, Fn, R>{op.state_});
         }};
     }
 
@@ -508,7 +536,6 @@ namespace exec {
     __exec_system_scheduler_interface* scheduler_impl_ = nullptr;
     Sender pred_;
     Shape shape_;
-    // TODO: Store this in OS and reference it from lambda passed to type erased OS
     Fun fun_;
   };
 
@@ -540,5 +567,6 @@ namespace exec {
     return system_bulk_sender<S, Shape, Fn>{
       sch.scheduler_interface_, (S&&) pred, shape, (Fn&&) fun};
   }
+
 
 } // namespace exec
