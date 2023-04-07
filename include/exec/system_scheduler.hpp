@@ -437,8 +437,31 @@ namespace exec {
 
     template <class... As>
     friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
+      std::cerr << "Trying to set_value on bulk receiver\n";
       //self.set_value(std::move(self));
       // TODO: Construct stuff then wrap op_.recv
+      // Construct bulk operation
+      auto sched = self.state_.snd_.scheduler_impl_;
+      std::cerr << "\tsched: " << sched << "\n";
+      if(sched) {
+        auto* sender = sched->bulk(
+          self.state_.snd_.shape_,
+          [](long idx){
+            std::cerr << "\t\tBulk callback idx\n";
+            // TODO: Safely capture enough state to call the functino.
+          });
+        // Connect to a type-erasing receiver to call our receiver on completion
+        self.state_.os_ = sender->connect(
+          __exec_system_receiver{
+            &self.state_.recv_,
+            [](void* cpp_recv){
+              stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
+            },
+            [](void* cpp_recv){
+              stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
+            }});
+        self.state_.os_->start();
+      }
     }
 
     friend void tag_invoke(stdexec::set_stopped_t, bulk_recv&& self) noexcept {
@@ -460,6 +483,7 @@ namespace exec {
     template<class InitF>
     __bulk_op(system_bulk_sender<Pred, Shape, Fn>&& snd, R&& recv, InitF&& initFunc) :
         state_{std::move(snd), std::move(recv)}, pred_operation_state_{initFunc(*this)} {
+      std::cerr << "\tconstruct bulk_op\n";
     }
     __bulk_op(const __bulk_op&) = delete;
     __bulk_op(__bulk_op&&) = delete;
@@ -467,9 +491,14 @@ namespace exec {
     __bulk_op& operator= (__bulk_op&&) = delete;
 
     friend void tag_invoke(stdexec::start_t, __bulk_op& op) noexcept {
+      std::cerr << "\tstart bulk_op\n";
       if(auto os = op.state_.os_) {
+        std::cerr << "\tstart bulk abstract op\n";
         os->start();
       }
+      // Start inner operation state
+      // Bulk operation will be started when that completes
+      stdexec::start(op.pred_operation_state_);
     }
 
     bulk_state<Pred, Shape, Fn, R> state_;
@@ -477,8 +506,7 @@ namespace exec {
   };
 
   template<stdexec::sender Pred, std::integral Shape, class Fn>
-  class system_bulk_sender {
-  public:
+  struct system_bulk_sender {
     using Sender = Pred;
     using Fun = Fn;
     using is_sender = void;
@@ -495,8 +523,6 @@ namespace exec {
       shape_{std::move(shape)},
       fun_{std::move(fun)} {}
 
-  private:
-
     template <class R>
     friend auto tag_invoke(stdexec::connect_t, system_bulk_sender&& snd, R&& rec) //
       noexcept(std::is_nothrow_constructible_v<std::remove_cvref_t<R>, R>)
@@ -506,6 +532,7 @@ namespace exec {
         std::move(snd),
         std::move(rec),
         [](auto& op){
+          std::cerr << "\tconnect pred with bulk_recv\n";
           // Connect bulk input receiver with the previous operation and store in the OS
           return stdexec::connect(std::move(op.state_.snd_.pred_), bulk_recv<Pred, Shape, Fn, R>{op.state_});
         }};
