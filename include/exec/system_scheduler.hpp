@@ -35,7 +35,11 @@ struct __exec_system_context_interface {
 
 // bulk function for scheduler to transmit from, will wrap actual function stub stored in real type
 using __exec_system_bulk_shape = long;
-using __exec_system_bulk_function = void(__exec_system_bulk_shape);
+using __exec_system_bulk_fn = void(void*, __exec_system_bulk_shape);
+struct __exec_system_bulk_function_object {
+  void* fn_state = nullptr;
+  __exec_system_bulk_fn* fn = nullptr;
+};
 
 
 struct __exec_system_scheduler_interface {
@@ -43,7 +47,7 @@ struct __exec_system_scheduler_interface {
   virtual __exec_system_sender_interface* schedule() = 0;
   // TODO: Move chaining in here to support chaining after a system_sender or other system_bulk_sender
   // or don't do anything that specific?
-  virtual __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function* fn) = 0;
+  virtual __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function_object fn) = 0;
   virtual bool equals(const __exec_system_scheduler_interface* rhs) const = 0;
 };
 
@@ -90,7 +94,7 @@ struct __exec_system_scheduler_impl : public __exec_system_scheduler_interface {
 
   __exec_system_sender_interface* schedule() override;
 
-  __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function* fn) override;
+  __exec_system_sender_interface* bulk(__exec_system_bulk_shape shp, __exec_system_bulk_function_object fn) override;
 
   stdexec::forward_progress_guarantee get_forward_progress_guarantee() const override {
     return stdexec::forward_progress_guarantee::parallel;
@@ -196,7 +200,7 @@ struct __exec_system_bulk_pool_receiver {
 struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_state_interface {
   __exec_system_bulk_operation_state_impl(
     __exec_pool_sender_t&& pool_sender,
-    __exec_system_bulk_function* bulk_function,
+    __exec_system_bulk_function_object bulk_function,
     __exec_system_receiver&& recv) :
     recv_{std::move(recv)},
     bulk_function_{bulk_function},
@@ -217,7 +221,7 @@ struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_
   }
 
   __exec_system_receiver recv_;
-  __exec_system_bulk_function* bulk_function_ = nullptr;
+  __exec_system_bulk_function_object bulk_function_;
   decltype(stdexec::connect(
       std::move(std::declval<__exec_pool_sender_t>()), std::move(std::declval<__exec_system_bulk_pool_receiver>())))
     pool_operation_state_;
@@ -238,7 +242,7 @@ inline void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&
 struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
   __exec_system_bulk_sender_impl(
         __exec_system_scheduler_impl* scheduler,
-        __exec_system_bulk_function* bulk_function,
+        __exec_system_bulk_function_object bulk_function,
         __exec_pool_sender_t&& pool_sender) :
       scheduler_{scheduler},
       bulk_function_{bulk_function},
@@ -257,7 +261,7 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
   };
 
    __exec_system_scheduler_impl* scheduler_;
-  __exec_system_bulk_function* bulk_function_ = nullptr;
+  __exec_system_bulk_function_object bulk_function_;
    __exec_pool_sender_t pool_sender_;
 };
 
@@ -281,7 +285,7 @@ inline __exec_system_sender_interface* __exec_system_scheduler_impl::schedule() 
 
 inline __exec_system_sender_interface* __exec_system_scheduler_impl::bulk(
     __exec_system_bulk_shape shp,
-    __exec_system_bulk_function* fn) {
+    __exec_system_bulk_function_object fn) {
   return new __exec_system_bulk_sender_impl(this, fn, stdexec::schedule(pool_scheduler_));
 }
 
@@ -426,6 +430,7 @@ namespace exec {
   struct bulk_state {
     system_bulk_sender<Pred, Shape, Fn> snd_;
     R recv_;
+    void* arg_data_ = nullptr;
     __exec_system_operation_state_interface* os_ = nullptr;
   };
 
@@ -443,18 +448,29 @@ namespace exec {
     template <class... As>
     friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
       std::cerr << "Trying to set_value on bulk receiver\n";
-      //self.set_value(std::move(self));
-      // TODO: Construct stuff then wrap op_.recv
-      // Construct bulk operation
+      // Heap allocate input data in shared state as needed
+      std::tuple<As...> *inputs = new std::tuple<As...>{as...};
+      self.state_.arg_data_ = inputs;
+
+      // Construct bulk operation with type conversions to use C ABI state
       auto sched = self.state_.snd_.scheduler_impl_;
       std::cerr << "\tsched: " << sched << "\n";
       if(sched) {
-        auto* sender = sched->bulk(
-          self.state_.snd_.shape_,
-          [](long idx){
+        __exec_system_bulk_function_object fn {
+          &self.state_,
+          [](void* state_, long idx){
+            bulk_state<Pred, Shape, Fn, R>* state =
+              static_cast<bulk_state<Pred, Shape, Fn, R>*>(state_);
             std::cerr << "\t\tBulk callback idx\n";
-            // TODO: Safely capture enough state to call the functino.
-          });
+
+            std::apply(
+              [&](auto &&... args) {
+                std::cerr << "\t\tBulk callback apply idx\n";
+                state->snd_.fun_(idx, args...);
+              },
+              *static_cast<std::tuple<As...> *>(state->arg_data_));
+          }};
+        auto* sender = sched->bulk(self.state_.snd_.shape_, fn);
         // Connect to a type-erasing receiver to call our receiver on completion
         self.state_.os_ = sender->connect(
           __exec_system_receiver{
