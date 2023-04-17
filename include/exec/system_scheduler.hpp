@@ -284,13 +284,6 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
 };
 
 
-// Phase 1 implementation, single implementation
-static __exec_system_context_impl* __get_exec_system_context_impl() {
-  static __exec_system_context_impl impl_;
-
-  return &impl_;
-}
-
 inline __exec_system_scheduler_interface* __exec_system_context_impl::get_scheduler() noexcept {
   // TODO: ref counting etc
   return new __exec_system_scheduler_impl(this, pool_.get_scheduler());
@@ -312,6 +305,17 @@ inline __exec_system_sender_interface* __exec_system_scheduler_impl::bulk(
 }
 
 
+
+// Phase 1 implementation, single implementation
+// TODO: Make a weak symbol and replace in a test
+static __exec_system_context_impl* __get_exec_system_context_impl() {
+  static __exec_system_context_impl impl_;
+
+  return &impl_;
+}
+
+// TODO: Move everything above here to a detail header and wrap in a
+// namespace to represent extern "C"
 
 
 namespace exec {
