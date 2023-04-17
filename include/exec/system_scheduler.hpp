@@ -59,7 +59,8 @@ struct __exec_system_receiver {
   void* cpp_recv_ = nullptr;
   void (*set_value)(void* cpp_recv);
   void (*set_stopped)(void* cpp_recv);
-  // TODO: set_error
+  // Type-erase the exception pointer for extern-c-ness
+  void (*set_error)(void* cpp_recv, void* exception);
 
 };
 
@@ -113,8 +114,7 @@ struct __exec_system_pool_receiver {
 
   friend void tag_invoke(stdexec::set_stopped_t, __exec_system_pool_receiver&&) noexcept;
 
-  friend void tag_invoke(stdexec::set_error_t, __exec_system_pool_receiver&&, std::exception_ptr) noexcept {
-  }
+  friend void tag_invoke(stdexec::set_error_t, __exec_system_pool_receiver&&, std::exception_ptr) noexcept;
 
   friend stdexec::empty_env tag_invoke(stdexec::get_env_t, const __exec_system_pool_receiver&) noexcept {
     return {};
@@ -158,6 +158,10 @@ inline void tag_invoke(stdexec::set_stopped_t, __exec_system_pool_receiver&& rec
   recv.os_->recv_.set_stopped(&(system_recv.cpp_recv_));
 }
 
+inline void tag_invoke(stdexec::set_error_t, __exec_system_pool_receiver&& recv, std::exception_ptr ptr) noexcept {
+  __exec_system_receiver &system_recv = recv.os_->recv_;
+  recv.os_->recv_.set_error(&(system_recv.cpp_recv_), &ptr);
+}
 
 
 struct __exec_system_sender_impl : public __exec_system_sender_interface {
@@ -187,9 +191,7 @@ struct __exec_system_bulk_pool_receiver {
 
   friend void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&&) noexcept;
 
-  friend void tag_invoke(stdexec::set_error_t, __exec_system_bulk_pool_receiver&&, std::exception_ptr) noexcept {
-    // TODO: Implement, and what about necessary type erasure? Maybe we allow bypass only but only exceptions can come from the pool
-  }
+  friend void tag_invoke(stdexec::set_error_t, __exec_system_bulk_pool_receiver&&, std::exception_ptr) noexcept;
 
   friend stdexec::empty_env tag_invoke(stdexec::get_env_t, const __exec_system_bulk_pool_receiver&) noexcept {
     return {};
@@ -250,7 +252,10 @@ inline void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&
   recv.os_->recv_.set_stopped(&(system_recv.cpp_recv_));
 }
 
-// TODO: set_error with type erasure
+inline void tag_invoke(stdexec::set_error_t, __exec_system_bulk_pool_receiver&& recv, std::exception_ptr ptr) noexcept {
+  __exec_system_receiver &system_recv = recv.os_->recv_;
+  recv.os_->recv_.set_error(&(system_recv.cpp_recv_), &ptr);
+}
 
 // A bulk sender is just a system sender viewed externally.
 // TODO: a bulk operation state is just a system operation state viewed externally
@@ -423,6 +428,11 @@ namespace exec {
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
+            },
+            [](void* cpp_recv, void* exception){
+              stdexec::set_error(
+                std::move(*static_cast<R*>(cpp_recv)),
+                std::move(*static_cast<std::exception_ptr*>(exception)));
             }};
 
           return op.snd_.sender_impl_->connect(std::move(receiver_impl));
@@ -497,7 +507,12 @@ namespace exec {
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
-            }}); // TODO: Add error to this receiver
+            },
+            [](void* cpp_recv, void* exception){
+              stdexec::set_error(
+                std::move(*static_cast<R*>(cpp_recv)),
+                std::move(*static_cast<std::exception_ptr*>(exception)));
+            }});
         self.state_.os_->start();
       }
     }
@@ -506,8 +521,8 @@ namespace exec {
       stdexec::set_stopped(std::move(self.state_.recv_));
     }
 
-    friend void tag_invoke(stdexec::set_error_t, bulk_recv&&, std::exception_ptr) noexcept {
-      // TODO: error
+    friend void tag_invoke(stdexec::set_error_t, bulk_recv&& self, std::exception_ptr ptr) noexcept {
+      stdexec::set_error(std::move(self.state_.recv_), std::move(ptr));
     }
 
     friend auto tag_invoke(stdexec::get_env_t, const bulk_recv& self) noexcept {
@@ -547,8 +562,8 @@ namespace exec {
     using Fun = Fn;
     using is_sender = void;
     using completion_signatures =
-      stdexec::completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t() >;
-      // TODO: error
+      stdexec::completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t(), stdexec::set_error_t(std::exception_ptr) >;
+      // TODO: This can complete with different values... should propagate from Pred
 
     system_bulk_sender(
       __exec_system_scheduler_interface* scheduler_impl,
