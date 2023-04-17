@@ -188,6 +188,7 @@ struct __exec_system_bulk_pool_receiver {
   friend void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&&) noexcept;
 
   friend void tag_invoke(stdexec::set_error_t, __exec_system_bulk_pool_receiver&&, std::exception_ptr) noexcept {
+    // TODO: Implement, and what about necessary type erasure? Maybe we allow bypass only but only exceptions can come from the pool
   }
 
   friend stdexec::empty_env tag_invoke(stdexec::get_env_t, const __exec_system_bulk_pool_receiver&) noexcept {
@@ -248,6 +249,8 @@ inline void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&
   __exec_system_receiver &system_recv = recv.os_->recv_;
   recv.os_->recv_.set_stopped(&(system_recv.cpp_recv_));
 }
+
+// TODO: set_error with type erasure
 
 // A bulk sender is just a system sender viewed externally.
 // TODO: a bulk operation state is just a system operation state viewed externally
@@ -490,14 +493,13 @@ namespace exec {
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
-            }});
+            }}); // TODO: Add error to this receiver
         self.state_.os_->start();
       }
     }
 
     friend void tag_invoke(stdexec::set_stopped_t, bulk_recv&& self) noexcept {
-      // TODO: Stopped
-      //self.set_stopped(std::move(self));
+      stdexec::set_stopped(std::move(self.state_.recv_));
     }
 
     friend void tag_invoke(stdexec::set_error_t, bulk_recv&&, std::exception_ptr) noexcept {
@@ -542,6 +544,7 @@ namespace exec {
     using is_sender = void;
     using completion_signatures =
       stdexec::completion_signatures< stdexec::set_value_t(), stdexec::set_stopped_t() >;
+      // TODO: error
 
     system_bulk_sender(
       __exec_system_scheduler_interface* scheduler_impl,
