@@ -105,7 +105,6 @@ TEST_CASE("simple bulk task on system context", "[types][system_scheduler]") {
     ex::schedule(sched),
     num_tasks,
     [&](long id) {
-      std::cerr << "Bulk call on id: " << id << "\n";
       pool_ids[id] = std::this_thread::get_id();
     });
 

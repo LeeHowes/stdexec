@@ -197,17 +197,17 @@ struct __exec_system_bulk_pool_receiver {
   __exec_system_bulk_operation_state_impl* os_ = nullptr;
 };
 
-auto __exec_pool_operation_state(__exec_system_bulk_operation_state_impl* self, __exec_pool_sender_t&& ps, __exec_system_bulk_shape shp, __exec_system_bulk_function_object fn) {
-  std::cerr << "Building OS on pool. fn.fn = " << fn.fn << ", fn.fn_state = " << fn.fn_state << "\n";
+auto __exec_pool_operation_state(
+    __exec_system_bulk_operation_state_impl* self,
+    __exec_pool_sender_t&& ps,
+    __exec_system_bulk_shape shp,
+    __exec_system_bulk_function_object fn) {
  return stdexec::connect(
           stdexec::bulk(
             std::move(ps),
             shp,
             [fn](long idx){
-              std::cerr << "\t\tPer idx func at: " << idx << " calling fn " << fn.fn << " with state " << fn.fn_state << "\n";
               fn.fn(fn.fn_state, idx);
-
-              std::cerr << "\t\tEnd of per idx func at: " << idx << "\n";
             }),
           __exec_system_bulk_pool_receiver{self});
 }
@@ -240,7 +240,6 @@ struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_
 };
 
 inline void tag_invoke(stdexec::set_value_t, __exec_system_bulk_pool_receiver&& recv) noexcept {
-  std::cerr << "Bulk pool receiver set_value\n";
   __exec_system_receiver &system_recv = recv.os_->recv_;
   system_recv.set_value((system_recv.cpp_recv_));
 }
@@ -262,12 +261,10 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
       bulk_shape_{bulk_shape},
       bulk_function_{bulk_function},
       pool_sender_(std::move(pool_sender)) {
-    std::cerr << "\tConstruct bulk_sender with fn.fn = " << bulk_function_.fn << " state = " << bulk_function_.fn_state << "\n";
 
   }
 
   __exec_system_operation_state_interface* connect(__exec_system_receiver recv) noexcept override {
-    std::cerr << "\tConnect bulk_sender with fn.fn = " << bulk_function_.fn << " state = " << bulk_function_.fn_state << "\n";
     return
       new __exec_system_bulk_operation_state_impl(
         std::move(pool_sender_), bulk_shape_, bulk_function_, std::move(recv));
@@ -460,70 +457,51 @@ namespace exec {
   struct bulk_recv {
     bulk_state<Pred, Shape, Fn, R>& state_;
 
-    // TODO: Migrate code into these
-    // Code will make bulk call passing system_exec_recv that calls cpp_recv
-    // Passing stub lambda that calls fun
-    //void (*set_value)(void* cpp_recv);
-    //
-    //void (*set_stopped)(void* cpp_recv);
-
-
     template <class... As>
     friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
-      std::cerr << "Trying to set_value on bulk receiver\n";
 
       // Heap allocate input data in shared state as needed
       std::tuple<As...> *inputs = new std::tuple<As...>{as...};
-
-      std::cerr << "setting inputs\n";
       self.state_.arg_data_ = inputs;
-
-      std::cerr << "Has set inputs\n";
 
       // Construct bulk operation with type conversions to use C ABI state
       auto sched = self.state_.snd_.scheduler_impl_;
-      std::cerr << "\tsched: " << sched << "\n";
       if(sched) {
         __exec_system_bulk_function_object fn {
           &self.state_,
           [](void* state_, long idx){
             bulk_state<Pred, Shape, Fn, R>* state =
               static_cast<bulk_state<Pred, Shape, Fn, R>*>(state_);
-            std::cerr << "\t\tBulk callback at " << idx << " with state " << state_ << "\n";
 
             std::apply(
               [&](auto &&... args) {
-                std::cerr << "\t\tBulk callback apply " << idx << "\n";
                 state->snd_.fun_(idx, args...);
               },
               *static_cast<std::tuple<As...> *>(state->arg_data_));
           }};
 
-        std::cerr << "\tconstructed fn, about to call bulk with shape: " << self.state_.snd_.shape_ << ", fn.fn: " << fn.fn << " fn.fn_state: " << fn.fn_state << "\n";
         auto* sender = sched->bulk(self.state_.snd_.shape_, fn);
-        std::cerr << "\tcalled bulk, returned: " << sender << "\n";
         // Connect to a type-erasing receiver to call our receiver on completion
         self.state_.os_ = sender->connect(
           __exec_system_receiver{
             &self.state_.recv_,
             [](void* cpp_recv){
-              std::cerr << "\tSet_value in type erased receiver\n";
               stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
             }});
-        std::cerr << "\tConnected with os: " << self.state_.os_ << "\n";
         self.state_.os_->start();
-        std::cerr << "\tafter start\n";
       }
     }
 
     friend void tag_invoke(stdexec::set_stopped_t, bulk_recv&& self) noexcept {
+      // TODO: Stopped
       //self.set_stopped(std::move(self));
     }
 
     friend void tag_invoke(stdexec::set_error_t, bulk_recv&&, std::exception_ptr) noexcept {
+      // TODO: error
     }
 
     friend auto tag_invoke(stdexec::get_env_t, const bulk_recv& self) noexcept {
@@ -538,7 +516,6 @@ namespace exec {
     template<class InitF>
     __bulk_op(system_bulk_sender<Pred, Shape, Fn>&& snd, R&& recv, InitF&& initFunc) :
         state_{std::move(snd), std::move(recv)}, pred_operation_state_{initFunc(*this)} {
-      std::cerr << "\tconstruct bulk_op\n";
     }
     __bulk_op(const __bulk_op&) = delete;
     __bulk_op(__bulk_op&&) = delete;
@@ -546,9 +523,7 @@ namespace exec {
     __bulk_op& operator= (__bulk_op&&) = delete;
 
     friend void tag_invoke(stdexec::start_t, __bulk_op& op) noexcept {
-      std::cerr << "\tstart bulk_op\n";
       if(auto os = op.state_.os_) {
-        std::cerr << "\tstart bulk abstract op\n";
         os->start();
       }
       // Start inner operation state
@@ -587,7 +562,6 @@ namespace exec {
         std::move(snd),
         std::move(rec),
         [](auto& op){
-          std::cerr << "\tconnect pred with bulk_recv\n";
           // Connect bulk input receiver with the previous operation and store in the OS
           return stdexec::connect(std::move(op.state_.snd_.pred_), bulk_recv<Pred, Shape, Fn, R>{op.state_});
         }};
