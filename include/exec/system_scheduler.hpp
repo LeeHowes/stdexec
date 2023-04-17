@@ -198,12 +198,12 @@ struct __exec_system_bulk_pool_receiver {
 };
 
 auto __exec_pool_operation_state(__exec_system_bulk_operation_state_impl* self, __exec_pool_sender_t&& ps, __exec_system_bulk_shape shp, __exec_system_bulk_function_object fn) {
-  std::cerr << "Building OS on pool\n";
+  std::cerr << "Building OS on pool. fn.fn = " << fn.fn << ", fn.fn_state = " << fn.fn_state << "\n";
  return stdexec::connect(
           stdexec::bulk(
             std::move(ps),
             shp,
-            [&fn](long idx){
+            [fn](long idx){
               std::cerr << "\t\tPer idx func at: " << idx << " calling fn " << fn.fn << " with state " << fn.fn_state << "\n";
               fn.fn(fn.fn_state, idx);
 
@@ -262,10 +262,12 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
       bulk_shape_{bulk_shape},
       bulk_function_{bulk_function},
       pool_sender_(std::move(pool_sender)) {
+    std::cerr << "\tConstruct bulk_sender with fn.fn = " << bulk_function_.fn << " state = " << bulk_function_.fn_state << "\n";
 
   }
 
   __exec_system_operation_state_interface* connect(__exec_system_receiver recv) noexcept override {
+    std::cerr << "\tConnect bulk_sender with fn.fn = " << bulk_function_.fn << " state = " << bulk_function_.fn_state << "\n";
     return
       new __exec_system_bulk_operation_state_impl(
         std::move(pool_sender_), bulk_shape_, bulk_function_, std::move(recv));
@@ -465,6 +467,7 @@ namespace exec {
     //
     //void (*set_stopped)(void* cpp_recv);
 
+
     template <class... As>
     friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
       std::cerr << "Trying to set_value on bulk receiver\n";
@@ -486,17 +489,17 @@ namespace exec {
           [](void* state_, long idx){
             bulk_state<Pred, Shape, Fn, R>* state =
               static_cast<bulk_state<Pred, Shape, Fn, R>*>(state_);
-            std::cerr << "\t\tBulk callback idx\n";
+            std::cerr << "\t\tBulk callback at " << idx << " with state " << state_ << "\n";
 
             std::apply(
               [&](auto &&... args) {
-                std::cerr << "\t\tBulk callback apply idx\n";
+                std::cerr << "\t\tBulk callback apply " << idx << "\n";
                 state->snd_.fun_(idx, args...);
               },
               *static_cast<std::tuple<As...> *>(state->arg_data_));
           }};
 
-        std::cerr << "\tconstructed fn, about to call bulk\n";
+        std::cerr << "\tconstructed fn, about to call bulk with shape: " << self.state_.snd_.shape_ << ", fn.fn: " << fn.fn << " fn.fn_state: " << fn.fn_state << "\n";
         auto* sender = sched->bulk(self.state_.snd_.shape_, fn);
         std::cerr << "\tcalled bulk, returned: " << sender << "\n";
         // Connect to a type-erasing receiver to call our receiver on completion
