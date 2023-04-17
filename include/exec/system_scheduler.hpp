@@ -197,17 +197,30 @@ struct __exec_system_bulk_pool_receiver {
   __exec_system_bulk_operation_state_impl* os_ = nullptr;
 };
 
+auto __exec_pool_operation_state(__exec_system_bulk_operation_state_impl* self, __exec_pool_sender_t&& ps, __exec_system_bulk_shape shp, __exec_system_bulk_function_object fn) {
+  std::cerr << "Building OS on pool\n";
+ return stdexec::connect(
+          stdexec::bulk(
+            std::move(ps),
+            shp,
+            [&fn](long idx){
+              std::cerr << "\t\tPer idx func at: " << idx << " calling fn " << fn.fn << " with state " << fn.fn_state << "\n";
+              fn.fn(fn.fn_state, idx);
+
+              std::cerr << "\t\tEnd of per idx func at: " << idx << "\n";
+            }),
+          __exec_system_bulk_pool_receiver{self});
+}
+
 struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_state_interface {
   __exec_system_bulk_operation_state_impl(
     __exec_pool_sender_t&& pool_sender,
+    __exec_system_bulk_shape bulk_shape,
     __exec_system_bulk_function_object bulk_function,
     __exec_system_receiver&& recv) :
     recv_{std::move(recv)},
     bulk_function_{bulk_function},
-    // TODO: Clearly this is going to be more sophisticated to launch multiple elements
-    // TODO: Call bulk_function_ across pool
-    pool_operation_state_{
-      [&](){return stdexec::connect(std::move(pool_sender), __exec_system_bulk_pool_receiver{this});}()} {
+    pool_operation_state_{__exec_pool_operation_state(this, std::move(pool_sender), bulk_shape, bulk_function_)} {
   }
 
   __exec_system_bulk_operation_state_impl(const __exec_system_bulk_operation_state_impl&) = delete;
@@ -222,12 +235,12 @@ struct __exec_system_bulk_operation_state_impl : public __exec_system_operation_
 
   __exec_system_receiver recv_;
   __exec_system_bulk_function_object bulk_function_;
-  decltype(stdexec::connect(
-      std::move(std::declval<__exec_pool_sender_t>()), std::move(std::declval<__exec_system_bulk_pool_receiver>())))
+  decltype(__exec_pool_operation_state(std::declval<__exec_system_bulk_operation_state_impl*>(), std::declval<__exec_pool_sender_t>(), __exec_system_bulk_shape{}, __exec_system_bulk_function_object{}))
     pool_operation_state_;
 };
 
 inline void tag_invoke(stdexec::set_value_t, __exec_system_bulk_pool_receiver&& recv) noexcept {
+  std::cerr << "Bulk pool receiver set_value\n";
   __exec_system_receiver &system_recv = recv.os_->recv_;
   system_recv.set_value((system_recv.cpp_recv_));
 }
@@ -242,9 +255,11 @@ inline void tag_invoke(stdexec::set_stopped_t, __exec_system_bulk_pool_receiver&
 struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
   __exec_system_bulk_sender_impl(
         __exec_system_scheduler_impl* scheduler,
+        __exec_system_bulk_shape bulk_shape,
         __exec_system_bulk_function_object bulk_function,
         __exec_pool_sender_t&& pool_sender) :
       scheduler_{scheduler},
+      bulk_shape_{bulk_shape},
       bulk_function_{bulk_function},
       pool_sender_(std::move(pool_sender)) {
 
@@ -253,7 +268,7 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
   __exec_system_operation_state_interface* connect(__exec_system_receiver recv) noexcept override {
     return
       new __exec_system_bulk_operation_state_impl(
-        std::move(pool_sender_), bulk_function_, std::move(recv));
+        std::move(pool_sender_), bulk_shape_, bulk_function_, std::move(recv));
   }
 
   __exec_system_scheduler_interface* get_completion_scheduler() noexcept override {
@@ -261,6 +276,7 @@ struct __exec_system_bulk_sender_impl : public __exec_system_sender_interface {
   };
 
    __exec_system_scheduler_impl* scheduler_;
+   __exec_system_bulk_shape bulk_shape_;
   __exec_system_bulk_function_object bulk_function_;
    __exec_pool_sender_t pool_sender_;
 };
@@ -286,7 +302,11 @@ inline __exec_system_sender_interface* __exec_system_scheduler_impl::schedule() 
 inline __exec_system_sender_interface* __exec_system_scheduler_impl::bulk(
     __exec_system_bulk_shape shp,
     __exec_system_bulk_function_object fn) {
-  return new __exec_system_bulk_sender_impl(this, fn, stdexec::schedule(pool_scheduler_));
+  // This is bulk off a system_scheduler, so we need to start with schedule.
+  // TODO: a version later will key off a bulk *sender* and would behave slightly
+  // differently.
+  // In both cases pass in the result of schedule, or the predecessor though.
+  return new __exec_system_bulk_sender_impl(this, shp, fn, stdexec::schedule(pool_scheduler_));
 }
 
 
@@ -448,9 +468,14 @@ namespace exec {
     template <class... As>
     friend void tag_invoke(stdexec::set_value_t, bulk_recv&& self, As&&... as) noexcept {
       std::cerr << "Trying to set_value on bulk receiver\n";
+
       // Heap allocate input data in shared state as needed
       std::tuple<As...> *inputs = new std::tuple<As...>{as...};
+
+      std::cerr << "setting inputs\n";
       self.state_.arg_data_ = inputs;
+
+      std::cerr << "Has set inputs\n";
 
       // Construct bulk operation with type conversions to use C ABI state
       auto sched = self.state_.snd_.scheduler_impl_;
@@ -470,18 +495,24 @@ namespace exec {
               },
               *static_cast<std::tuple<As...> *>(state->arg_data_));
           }};
+
+        std::cerr << "\tconstructed fn, about to call bulk\n";
         auto* sender = sched->bulk(self.state_.snd_.shape_, fn);
+        std::cerr << "\tcalled bulk, returned: " << sender << "\n";
         // Connect to a type-erasing receiver to call our receiver on completion
         self.state_.os_ = sender->connect(
           __exec_system_receiver{
             &self.state_.recv_,
             [](void* cpp_recv){
+              std::cerr << "\tSet_value in type erased receiver\n";
               stdexec::set_value(std::move(*static_cast<R*>(cpp_recv)));
             },
             [](void* cpp_recv){
               stdexec::set_stopped(std::move(*static_cast<R*>(cpp_recv)));
             }});
+        std::cerr << "\tConnected with os: " << self.state_.os_ << "\n";
         self.state_.os_->start();
+        std::cerr << "\tafter start\n";
       }
     }
 

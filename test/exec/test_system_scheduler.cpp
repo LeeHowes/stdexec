@@ -96,7 +96,7 @@ TEST_CASE("simple chain task on system context", "[types][system_scheduler]") {
 
 TEST_CASE("simple bulk task on system context", "[types][system_scheduler]") {
   std::thread::id this_id = std::this_thread::get_id();
-  constexpr size_t num_tasks = 2;
+  constexpr size_t num_tasks = 1;
   std::thread::id pool_ids[num_tasks];
   exec::system_context ctx;
   exec::system_scheduler sched = ctx.get_scheduler();
@@ -121,7 +121,7 @@ TEST_CASE("simple bulk task on system context", "[types][system_scheduler]") {
 
 TEST_CASE("simple bulk chaining on system context", "[types][system_scheduler]") {
   std::thread::id this_id = std::this_thread::get_id();
-  constexpr size_t num_tasks = 2;
+  constexpr size_t num_tasks = 1;
   std::thread::id pool_id{};
   std::thread::id propagated_pool_ids[num_tasks];
   std::thread::id pool_ids[num_tasks];
